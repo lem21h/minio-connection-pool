@@ -25,6 +25,7 @@ import java.net.URL;
 import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MinioConnection {
     private static final String HEALTH_ENDPOINT = "/minio/health/live";
@@ -34,6 +35,8 @@ public class MinioConnection {
     private final URL urlAddress;
 
     private MinioClient client;
+
+    private final AtomicBoolean active = new AtomicBoolean();
 
     public MinioConnection(MinioConnectionConfig connectionDetails) throws MalformedURLException {
         this.connectionDetails = connectionDetails;
@@ -48,8 +51,10 @@ public class MinioConnection {
     public boolean checkConnection(int timeout) {
         try (final var socket = new Socket()) {
             socket.connect(inetAddress, timeout);
+            active.set(true);
             return true;
         } catch (Exception exception) {
+            active.set(false);
             return false;
         }
     }
@@ -75,16 +80,21 @@ public class MinioConnection {
             connection.setReadTimeout(readTimeout);
             connection.setRequestMethod("GET");
 
-            return connection.getResponseCode() == 200;
-        } catch (IOException exception) {
-            return false;
+            if (connection.getResponseCode() == 200) {
+                active.set(true);
+                return true;
+            }
+        } catch (Exception ignored) {
         }
+        active.set(false);
+        return false;
     }
 
     public boolean checkBucketExists(String bucket) throws MinioException, IOException {
         try {
             return getClient().bucketExists(BucketExistsArgs.builder().bucket(bucket).build());
         } catch (MinioException | InvalidKeyException | NoSuchAlgorithmException exception) {
+            notActive();
             throw new MinioException(exception.getMessage());
         }
     }
@@ -92,7 +102,12 @@ public class MinioConnection {
     public void createBucket(String bucket) throws MinioException, IOException {
         try {
             getClient().makeBucket(MakeBucketArgs.builder().bucket(bucket).build());
-        } catch (ErrorResponseException | XmlParserException | ServerException | NoSuchAlgorithmException | InvalidResponseException | InvalidKeyException | InternalException | InsufficientDataException exception) {
+        } catch (ErrorResponseException exception) {
+            if (!exception.errorResponse().code().equals("BucketAlreadyOwnedByYou")) {
+                throw new MinioException(exception.getMessage());
+            }
+        } catch (XmlParserException | ServerException | NoSuchAlgorithmException | InvalidResponseException | InvalidKeyException | InternalException | InsufficientDataException exception) {
+            notActive();
             throw new MinioException(exception.getMessage());
         }
     }
@@ -107,6 +122,7 @@ public class MinioConnection {
             );
             return stat.userMetadata();
         } catch (NoSuchAlgorithmException | InvalidKeyException | MinioException exception) {
+            notActive();
             throw new MinioException(exception.getMessage());
         }
     }
@@ -120,6 +136,7 @@ public class MinioConnection {
                             .build()
             );
         } catch (NoSuchAlgorithmException | InvalidKeyException | MinioException exception) {
+            notActive();
             throw new MinioException(exception.getMessage());
         }
     }
@@ -135,7 +152,16 @@ public class MinioConnection {
         } catch (ErrorResponseException | InsufficientDataException | InternalException |
                 InvalidKeyException | InvalidResponseException | NoSuchAlgorithmException |
                 ServerException | XmlParserException exception) {
+            notActive();
             throw new MinioException(exception.getMessage());
         }
+    }
+
+    public boolean isActive() {
+        return active.get();
+    }
+
+    public void notActive() {
+        active.set(false);
     }
 }
